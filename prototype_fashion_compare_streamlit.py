@@ -1,97 +1,98 @@
 import streamlit as st
-import torch
-import torch.nn as nn
-from torchvision import models, transforms
 from PIL import Image
+import torch
+import torchvision.transforms as transforms
+import torchvision.models as models
+import torch.nn as nn
 from transformers import CLIPProcessor, CLIPModel
+import time
+import numpy as np
+import pandas as pd
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# --- Konfigurasi Halaman ---
+st.set_page_config(page_title="Fashion Model Comparison", layout="wide")
+st.markdown("<h1 style='text-align: center;'>👗 Fashion Image Classifier: ResNet vs CLIP</h1>", unsafe_allow_html=True)
+st.markdown("<hr>", unsafe_allow_html=True)
 
-# Kategori fashion
-selected_categories = ['Tshirts', 'Jeans', 'Casual Shoes', 'Handbags', 'Sunglasses']
-label_to_idx = {label: idx for idx, label in enumerate(selected_categories)}
-idx_to_label = {idx: label for label, idx in label_to_idx.items()}
+# --- Kelas Label ---
+class_labels = ['Tshirts', 'Jeans', 'Casual Shoes', 'Handbags', 'Sunglasses']
 
-# Load model ResNet yang sudah dilatih ulang
-@st.cache_resource(show_spinner=False)
-def load_resnet_model():
+# --- Load CLIP ---
+@st.cache_resource
+def load_clip():
+    model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+    processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+    return model, processor
+
+# --- Load ResNet ---
+@st.cache_resource
+def load_resnet():
     model = models.resnet50(pretrained=False)
-    model.fc = nn.Linear(model.fc.in_features, len(selected_categories))
-    model.load_state_dict(torch.load('best_resnet_model.pth', map_location=device))
-    model.to(device)
+    model.fc = nn.Linear(model.fc.in_features, len(class_labels))
+    model.load_state_dict(torch.load("best_resnet_model.pth", map_location=torch.device("cpu")))
     model.eval()
     return model
 
-resnet_model = load_resnet_model()
-
-# Transformasi gambar untuk ResNet
-resnet_transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-])
-
-# Load model dan processor CLIP pretrained
-@st.cache_resource(show_spinner=False)
-def load_clip_model_processor():
-    model_name = "openai/clip-vit-base-patch32"
-    model = CLIPModel.from_pretrained(model_name).to(device)
-    processor = CLIPProcessor.from_pretrained(model_name)
-    return model, processor
-
-clip_model, clip_processor = load_clip_model_processor()
-
-clip_text_prompts = [
-    "a photo of a T-shirt",
-    "a photo of jeans",
-    "a photo of casual shoes",
-    "a photo of a handbag",
-    "a photo of sunglasses"
-]
-
-def predict_resnet(image: Image.Image):
-    input_tensor = resnet_transform(image).unsqueeze(0).to(device)
+# --- Prediksi CLIP ---
+def predict_clip(image):
+    model, processor = load_clip()
+    inputs = processor(text=class_labels, images=image, return_tensors="pt", padding=True)
     with torch.no_grad():
-        outputs = resnet_model(input_tensor)
-        probs = torch.softmax(outputs, dim=1)
-        conf, predicted = torch.max(probs, dim=1)
-        return idx_to_label[predicted.item()], conf.item()
+        start = time.time()
+        outputs = model(**inputs)
+        end = time.time()
+        logits = outputs.logits_per_image
+        probs = logits.softmax(dim=1).numpy().flatten()
+    return class_labels[np.argmax(probs)], np.max(probs), probs, end - start
 
-def predict_clip(image: Image.Image):
-    inputs = clip_processor(text=clip_text_prompts, images=image, return_tensors="pt", padding=True).to(device)
+# --- Prediksi ResNet ---
+def predict_resnet(image):
+    model = load_resnet()
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+    ])
+    img_tensor = transform(image).unsqueeze(0)
     with torch.no_grad():
-        outputs = clip_model(**inputs)
-        logits_per_image = outputs.logits_per_image
-        probs = logits_per_image.softmax(dim=1)
-        conf, predicted = torch.max(probs, dim=1)
-        label = clip_text_prompts[predicted.item()].replace("a photo of a ", "")
-        return label, conf.item()
+        start_time = time.time()
+        output = model(img_tensor)
+        end_time = time.time()
+        probs = torch.nn.functional.softmax(output, dim=1).numpy().flatten()
+    return class_labels[np.argmax(probs)], np.max(probs), probs, end_time - start_time
 
+# --- Upload dan Tampilan Gambar ---
+uploaded_file = st.file_uploader("📤 Upload gambar fashion untuk diklasifikasikan", type=["jpg", "jpeg", "png"])
 
-st.title("Prototype Perbandingan Model Fashion: ResNet-50 vs CLIP")
-st.write("Unggah gambar fashion dan lihat prediksi dari kedua model secara berdampingan.")
-
-uploaded_file = st.file_uploader("Unggah gambar (jpg, png)", type=["jpg", "jpeg", "png"])
-
-if uploaded_file is not None:
+if uploaded_file:
     image = Image.open(uploaded_file).convert("RGB")
-    st.image(image, caption="Gambar input", use_column_width=True)
 
-    if st.button("Prediksi"):
-        with st.spinner("Menjalankan prediksi..."):
-            resnet_label, resnet_conf = predict_resnet(image)
-            clip_label, clip_conf = predict_clip(image)
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        st.image(image, caption="🖼️ Gambar yang diupload", use_column_width=True)
+    with col2:
+        st.markdown("### 🔍 Prediksi Model")
+        with st.spinner("Memproses dengan ResNet dan CLIP..."):
+            # Prediksi dari kedua model
+            res_label, res_conf, res_probs, res_time = predict_resnet(image)
+            clip_label, clip_conf, clip_probs, clip_time = predict_clip(image)
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("ResNet-50 Fine-tuned")
-            st.write(f"Prediksi: **{resnet_label}**")
-            st.write(f"Confidence: {resnet_conf*100:.2f}%")
-        with col2:
-            st.subheader("CLIP Zero-shot")
-            st.write(f"Prediksi: **{clip_label}**")
-            st.write(f"Confidence: {clip_conf*100:.2f}%")
+        # --- Hasil Prediksi ---
+        st.markdown("#### ✅ Hasil Prediksi:")
+        st.markdown(f"- **ResNet:** `{res_label}` dengan confidence `{res_conf*100:.2f}%` (⏱ {res_time:.3f}s)")
+        st.markdown(f"- **CLIP:** `{clip_label}` dengan confidence `{clip_conf*100:.2f}%` (⏱ {clip_time:.3f}s)")
 
-        st.markdown("---")
-        st.write("Model ResNet-50 dilatih ulang pada dataset fashion Anda, sedangkan CLIP melakukan klasifikasi zero-shot berdasarkan prompt teks.")
+        # --- Tabel Perbandingan Confidence ---
+        df = pd.DataFrame({
+            "Label": class_labels,
+            "ResNet": res_probs,
+            "CLIP": clip_probs
+        }).set_index("Label")
 
+        st.markdown("#### 📊 Confidence Kedua Model:")
+        st.bar_chart(df)
+
+        # --- Highlight Winner ---
+        winner = "🤖 CLIP" if clip_conf > res_conf else "🧠 ResNet"
+        st.markdown(f"### 🥇 Model yang Lebih Yakin: **{winner}**")
+else:
+    st.info("Silakan upload gambar fashion terlebih dahulu untuk memulai.")
